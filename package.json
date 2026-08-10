@@ -1,0 +1,21 @@
+{
+  "name": "pi-venice-provider",
+  "version": "0.1.0",
+  "description": "Venice.ai provider extension for pi (OpenAI-compatible chat completions, per-model context windows, /login support).",
+  "type": "module",
+  "main": "index.ts",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "keywords": ["pi", "pi-package", "pi-extension", "venice", "venice.ai", "provider", "llm"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/perezdap/pi-venice-provider.git"
+  },
+  "homepage": "https://github.com/perezdap/pi-venice-provider",
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*"
+  }
+}
