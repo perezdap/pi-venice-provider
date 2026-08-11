@@ -1,5 +1,6 @@
 # Dependencies (machine-local resolution helpers for tests; never ship these)
 node_modules/
+.dowse_index/
 
 # Logs / temp
 *.log

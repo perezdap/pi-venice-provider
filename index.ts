@@ -4,16 +4,16 @@
  * Registers the "venice" provider against Venice's OpenAI-compatible Chat
  * Completions API (https://api.venice.ai/api/v1). The full model catalog —
  * including per-model context windows, max output tokens, pricing, and
- * capabilities — is discovered at startup from Venice's public /models
- * endpoint, so context windows are always correct for each model.
+ * capabilities — is discovered at runtime from Venice's public /models and
+ * /models/traits endpoints, so context windows stay correct and stable trait
+ * selectors such as default_code follow Venice's current routing.
  *
  * Auth: `/login venice` prompts for a Venice API key and stores it, with
  * $VENICE_API_KEY used as an automatic fallback. Chat requests are sent
  * exactly as Venice expects:
  *
  *   - `Authorization: Bearer <key>` (resolved by openai-completions + envApiKeyAuth)
- *   - `system` role (compat.supportsDeveloperRole = false) so Venice's
- *     system-prompt handling applies to our prompt
+ *   - `developer` role support, as documented by Venice's chat schema
  *   - `max_completion_tokens` (Venice's preferred field; `max_tokens` is deprecated)
  *   - `reasoning_effort` mapped per model from Venice's `reasoningEffortOptions`
  *     (off => "none", minimal/low/medium/high/xhigh/max => matching value,
@@ -24,12 +24,14 @@
  *   - For reasoning models that do not expose effort control, thinking is
  *     turned off via `venice_parameters.disable_thinking = true` when the user
  *     selects the "off" thinking level
- *   - Streamed `reasoning_content` deltas are parsed into thinking blocks by
- *     pi's built-in openai-completions API (no custom streaming needed)
+ *   - Streamed `reasoning_content` / `reasoning_details` are handled by pi's
+ *     built-in openai-completions API (no custom streaming needed)
+ *   - Prompt-cache read/write rates and long-context pricing tiers are mapped
+ *     from the live catalog
  *
  * Usage:
  *   /login venice        # enter your Venice API key (or export VENICE_API_KEY)
- *   /model venice/<id>   # pick a model, e.g. venice/zai-org-glm-5-1
+ *   /model venice/<id>   # pick a live ID or stable trait, e.g. venice/default_code
  *
  * Models are refreshed by /reload (re-runs this factory, re-fetches /models).
  */
@@ -46,7 +48,8 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/compat";
 
 const PROVIDER_ID = "venice";
 const VENICE_BASE_URL = "https://api.venice.ai/api/v1";
-const VENICE_MODELS_URL = "https://api.venice.ai/api/v1/models";
+const VENICE_MODELS_URL = "https://api.venice.ai/api/v1/models?type=text";
+const VENICE_MODEL_TRAITS_URL = "https://api.venice.ai/api/v1/models/traits?type=text";
 
 // pi thinking levels in increasing order of effort. Venice's "none" is pi's "off".
 const PI_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -79,10 +82,24 @@ function buildThinkingLevelMap(options: string[]): ThinkingLevelMap {
 
 // ---- Venice /models response shape (only the fields we use) ----
 
+interface VenicePrice {
+	usd?: number;
+}
+
+interface VeniceExtendedPricing {
+	context_token_threshold?: number;
+	input?: VenicePrice;
+	cache_input?: VenicePrice;
+	cache_write?: VenicePrice;
+	output?: VenicePrice;
+}
+
 interface VenicePricing {
-	input?: { usd?: number };
-	cache_input?: { usd?: number };
-	output?: { usd?: number };
+	input?: VenicePrice;
+	cache_input?: VenicePrice;
+	cache_write?: VenicePrice;
+	output?: VenicePrice;
+	extended?: VeniceExtendedPricing;
 }
 
 interface VeniceCapabilities {
@@ -92,6 +109,7 @@ interface VeniceCapabilities {
 	supportsVision?: boolean;
 	supportsMultipleImages?: boolean;
 	supportsFunctionCalling?: boolean;
+	supportsE2EE?: boolean;
 }
 
 interface VeniceModelSpec {
@@ -102,6 +120,7 @@ interface VeniceModelSpec {
 	maxCompletionTokens?: number;
 	capabilities?: VeniceCapabilities;
 	offline?: boolean;
+	beta?: boolean;
 }
 
 interface VeniceModel {
@@ -124,29 +143,53 @@ interface DiscoveredCatalog {
 }
 
 /** Fetch Venice's public model catalog and map every text model to a pi Model. */
-async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCatalog> {
-	const res = await fetch(VENICE_MODELS_URL, {
-		headers: { Accept: "application/json" },
-		signal: signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
-	});
+async function fetchVeniceJson<T>(url: string, endpoint: string, signal: AbortSignal): Promise<T> {
+	const res = await fetch(url, { headers: { Accept: "application/json" }, signal });
 	if (!res.ok) {
-		throw new Error(`Venice /models returned HTTP ${res.status} ${res.statusText}`);
+		throw new Error(`Venice ${endpoint} returned HTTP ${res.status} ${res.statusText}`);
 	}
-	const body = (await res.json()) as { data?: VeniceModel[] };
-	const data = body.data ?? [];
+	return (await res.json()) as T;
+}
+
+/** Fetch Venice's text catalog and stable trait aliases, then map them to pi models. */
+async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCatalog> {
+	const requestSignal = signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
+	const [modelsBody, traitsResult]: [
+		{ data?: VeniceModel[] },
+		{ data?: Record<string, string> },
+	] = await Promise.all([
+		fetchVeniceJson<{ data?: VeniceModel[] }>(VENICE_MODELS_URL, "/models", requestSignal),
+		fetchVeniceJson<{ data?: Record<string, string> }>(VENICE_MODEL_TRAITS_URL, "/models/traits", requestSignal).catch(
+			(error: unknown) => {
+				const message = error instanceof Error ? error.message : String(error);
+				console.warn(`[venice] trait discovery failed: ${message}. Concrete model IDs remain available.`);
+				return { data: {} };
+			},
+		),
+	]);
+	const data = modelsBody.data ?? [];
 
 	const models: Model<Api>[] = [];
 	const capabilities = new Map<string, ModelCaps>();
+	const modelsById = new Map<string, Model<Api>>();
 
 	for (const m of data) {
 		// Only chat-completion ("text") models are usable through this provider.
 		if (m.type !== "text") continue;
 		const spec = m.model_spec;
 		if (!spec) continue;
-		// Skip models Venice marks unavailable.
-		if (spec.offline) continue;
+		// Skip models Venice marks unavailable or restricted to beta users. The
+		// public discovery request cannot know whether the eventual key has beta access.
+		if (spec.offline || spec.beta) continue;
 		const caps = spec.capabilities;
 		if (!caps) continue;
+		// E2EE models require a client-side handshake and encrypted transport that
+		// pi's OpenAI-compatible adapter does not implement. Advertising them here
+		// would create selectable models that cannot complete a request safely.
+		if (caps.supportsE2EE) continue;
+		// pi is a tool-using coding agent. Models without function calling cannot
+		// participate in its agent loop, so do not advertise them as usable here.
+		if (!caps.supportsFunctionCalling) continue;
 
 		const reasoning = !!caps.supportsReasoning;
 		const effort = !!(caps.supportsReasoningEffort && caps.reasoningEffortOptions?.length);
@@ -155,6 +198,25 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 		const contextWindow = spec.availableContextTokens ?? m.context_length ?? DEFAULT_CONTEXT_WINDOW;
 		const maxTokens = spec.maxCompletionTokens ?? Math.min(contextWindow, DEFAULT_MAX_TOKENS);
 		const pricing = spec.pricing ?? {};
+		const baseCost = {
+			input: pricing.input?.usd ?? 0,
+			output: pricing.output?.usd ?? 0,
+			cacheRead: pricing.cache_input?.usd ?? 0,
+			cacheWrite: pricing.cache_write?.usd ?? 0,
+		};
+		const extended = pricing.extended;
+		const tiers =
+			extended?.context_token_threshold === undefined
+				? undefined
+				: [
+						{
+							inputTokensAbove: extended.context_token_threshold,
+							input: extended.input?.usd ?? baseCost.input,
+							output: extended.output?.usd ?? baseCost.output,
+							cacheRead: extended.cache_input?.usd ?? baseCost.cacheRead,
+							cacheWrite: extended.cache_write?.usd ?? baseCost.cacheWrite,
+						},
+					];
 		const input: ("text" | "image")[] = caps.supportsVision ? ["text", "image"] : ["text"];
 
 		const model = {
@@ -165,32 +227,42 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 			baseUrl: VENICE_BASE_URL,
 			reasoning,
 			input,
-			cost: {
-				input: pricing.input?.usd ?? 0,
-				output: pricing.output?.usd ?? 0,
-				// Venice charges cached prompt reads at cache_input. The openai-completions
-				// API maps prompt_tokens_details.cached_tokens -> cacheRead usage, so this
-				// rate is applied to cached tokens. Venice reports no cache-write tokens.
-				cacheRead: pricing.cache_input?.usd ?? 0,
-				cacheWrite: 0,
-			},
+			cost: { ...baseCost, ...(tiers ? { tiers } : {}) },
 			contextWindow,
 			maxTokens,
 			...(effort ? { thinkingLevelMap: buildThinkingLevelMap(effortOptions) } : {}),
 			compat: {
-				// Force the "system" role so Venice's system-prompt handling and our
-				// include_venice_system_prompt:false override apply to pi's prompt.
-				supportsDeveloperRole: false,
+				// Venice accepts both system and developer messages.
+				supportsDeveloperRole: true,
 				// Send reasoning_effort (OpenAI-compatible) only when the model
 				// actually exposes effort controls.
 				supportsReasoningEffort: effort,
 				// Venice prefers max_completion_tokens over the deprecated max_tokens.
 				maxTokensField: "max_completion_tokens" as const,
+				// Venice accepts Anthropic-style cache_control markers on content parts.
+				...(pricing.cache_input || pricing.cache_write ? { cacheControlFormat: "anthropic" as const } : {}),
 			},
 		} as unknown as Model<Api>;
 
 		models.push(model);
+		modelsById.set(m.id, model);
 		capabilities.set(m.id, { reasoning, hasNone });
+	}
+
+	// Traits are stable Venice-owned selectors. Register them as model aliases so
+	// users can choose venice/default_code (etc.) instead of pinning a rotating ID.
+	for (const [trait, targetId] of Object.entries(traitsResult.data ?? {})) {
+		const target = modelsById.get(targetId);
+		const targetCaps = capabilities.get(targetId);
+		if (!target || !targetCaps || modelsById.has(trait)) continue;
+		const alias = {
+			...target,
+			id: trait,
+			name: `${trait.replaceAll("_", " ")} (trait → ${target.name})`,
+		} as Model<Api>;
+		models.push(alias);
+		modelsById.set(trait, alias);
+		capabilities.set(trait, targetCaps);
 	}
 
 	models.sort((a, b) => a.name.localeCompare(b.name));

@@ -6,15 +6,19 @@ Completions API (`https://api.venice.ai/api/v1`).
 
 ## Features
 
-- **Correct per-model context windows.** The full model catalog — context
-  window, max output tokens, pricing, and capabilities — is discovered at
-  startup from Venice's public `/models` endpoint, so every model's context
-  window matches what Venice actually enforces.
+- **Runtime model discovery.** The text catalog — context window, max output
+  tokens, cache/long-context pricing, and capabilities — is discovered from
+  Venice's `/models?type=text` endpoint, so the provider does not pin a rotating
+  model list.
+- **Stable Venice trait selectors.** `/models/traits?type=text` is also resolved
+  at runtime, exposing entries such as `venice/default_code`,
+  `venice/default_reasoning`, and `venice/default_vision` alongside concrete
+  model IDs.
 - **`/login venice` support.** Prompts for and stores your Venice API key, with
   `VENICE_API_KEY` as an automatic fallback.
 - **Requests sent exactly as Venice expects:**
   - `Authorization: Bearer <key>`
-  - `system` role (so Venice's system-prompt handling applies)
+  - `developer` role support, as documented by Venice's chat schema
   - `max_completion_tokens` (Venice's preferred field)
   - `reasoning_effort` mapped per model from Venice's `reasoningEffortOptions`
     (`off → "none"` when Venice offers it; `minimal/low/medium/high/xhigh/max →`
@@ -27,8 +31,11 @@ Completions API (`https://api.venice.ai/api/v1`).
   - For reasoning models that can't express `off` via `reasoning_effort:"none"`
     (no `"none"` option, or no effort control), `venice_parameters.disable_thinking`
     is set when the thinking level is `off`
-  - Streamed `reasoning_content` deltas are parsed into pi thinking blocks by
-    the built-in `openai-completions` API
+  - Streamed `reasoning_content` and structured `reasoning_details` are handled
+    by the built-in `openai-completions` API
+  - Prompt-cache read/write rates and long-context pricing tiers are mapped
+    from the catalog; cache-capable models use Venice's supported
+    `cache_control` content markers
 
 ## Install
 
@@ -71,13 +78,13 @@ pi -e ./index.ts
 
 ```
 /login venice        # enter your Venice API key (or export VENICE_API_KEY first)
-/model venice/<id>   # pick a model, e.g. venice/zai-org-glm-5-1
+/model venice/<id>   # pick a live ID or stable trait, e.g. venice/default_code
 ```
 
 Set pi's default model in `settings.json` if desired:
 
 ```jsonc
-{ "defaultProvider": "venice", "defaultModel": "zai-org-glm-5-1" }
+{ "defaultProvider": "venice", "defaultModel": "default_code" }
 ```
 
 To pick up newly added Venice models, run `/reload` (the factory re-fetches
@@ -90,14 +97,25 @@ To pick up newly added Venice models, run `/reload` (the factory re-fetches
   `reasoning_content`, tool calls, usage, and `stop` reasons.
 - **Auth:** `envApiKeyAuth("Venice API key", ["VENICE_API_KEY"])` — stored
   credential wins, then `VENICE_API_KEY` env var.
-- **Model discovery:** `GET https://api.venice.ai/api/v1/models` (no auth
-  required), filtered to `type === "text"` and non-offline models.
+- **Model discovery:** `GET /models?type=text` plus
+  `GET /models/traits?type=text`, filtered to non-offline, non-beta text models
+  with function calling that do not require Venice's E2EE transport handshake.
+  Trait entries are aliases whose request model ID remains the trait, allowing
+  Venice to resolve the current target.
 - **Venice parameters:** injected via a `before_provider_request` handler
   scoped to `provider === "venice"`.
 
 ## Notes
 
-- Venice's `/models` endpoint requires no auth, so models load even before you
-  run `/login`. Requests, however, need a key.
-- This extension only handles text (chat-completion) models. Venice's image,
-  audio, and video endpoints are not wired up here.
+- Venice's public discovery endpoints load before `/login`; chat requests still
+  require an API key. This provider currently supports Bearer-key auth, not
+  Venice's optional x402 wallet flow.
+- This is intentionally a pi **chat provider**, not a client for every Venice
+  API surface. It handles text chat models (including image input where pi
+  supports it); Venice's standalone image, audio, video, embeddings, Responses,
+  augment, billing, crypto RPC, E2EE handshake, and media quote/queue endpoints
+  are outside its scope. E2EE-only and non-tool-calling models are therefore
+  omitted from the coding-agent picker.
+- Pi's message model currently advertises text/image inputs only. Venice models
+  with audio, video, or file input remain selectable for text chat, but those
+  additional input modalities are not exposed by this extension.
