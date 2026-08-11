@@ -52,6 +52,9 @@ assert(typeof provider.streamSimple === "function", "provider exposes streamSimp
 
 const models = provider.getModels();
 assert(models.length > 0, `discovered models (count=${models.length})`);
+const liveCatalog = await fetch("https://api.venice.ai/api/v1/models?type=text").then((response) => response.json());
+const liveById = new Map(liveCatalog.data.map((model) => [model.id, model]));
+assert(!models.some((m) => m.id.startsWith("e2ee-")), "E2EE-only models are omitted (transport handshake unsupported)");
 
 // Every mapped model must have the required fields and our compat overrides.
 for (const m of models) {
@@ -63,14 +66,38 @@ for (const m of models) {
 	assert(m.maxTokens <= m.contextWindow, `model ${m.id}: maxTokens <= contextWindow`);
 	assert(typeof m.cost.input === "number", `model ${m.id}: cost.input is number`);
 	assert(typeof m.cost.output === "number", `model ${m.id}: cost.output is number`);
+	assert(typeof m.cost.cacheRead === "number", `model ${m.id}: cost.cacheRead is number`);
+	assert(typeof m.cost.cacheWrite === "number", `model ${m.id}: cost.cacheWrite is number`);
+	for (const tier of m.cost.tiers ?? []) {
+		assert(tier.inputTokensAbove > 0, `model ${m.id}: tier threshold > 0`);
+		assert(typeof tier.cacheWrite === "number", `model ${m.id}: tier cacheWrite is number`);
+	}
 	assert(Array.isArray(m.input) && m.input.includes("text"), `model ${m.id}: input includes text`);
-	assertEq(m.compat?.supportsDeveloperRole, false, `model ${m.id}: supportsDeveloperRole=false (system role)`);
+	const live = liveById.get(m.id);
+	if (live) {
+		assertEq(live.model_spec.capabilities.supportsFunctionCalling, true, `model ${m.id}: supports function calling`);
+		assertEq(live.model_spec.capabilities.supportsE2EE, false, `model ${m.id}: does not require E2EE transport`);
+	}
+	assertEq(m.compat?.supportsDeveloperRole, true, `model ${m.id}: supportsDeveloperRole=true`);
 	assertEq(m.compat?.maxTokensField, "max_completion_tokens", `model ${m.id}: maxTokensField`);
 	// "off" must always remain selectable for reasoning models (never null).
 	if (m.reasoning) {
 		assert(m.thinkingLevelMap?.off !== null, `model ${m.id}: off is selectable (not null)`);
 	}
 }
+
+const traitModels = models.filter((m) => ["default", "default_reasoning", "default_code", "default_vision", "function_calling_default", "most_intelligent", "most_uncensored"].includes(m.id));
+assert(traitModels.length > 0, "discovered stable trait aliases from /models/traits");
+for (const m of traitModels) {
+	assert(m.name.includes("trait →"), `trait ${m.id}: display name identifies resolved target`);
+}
+
+const cacheWriteModels = models.filter((m) => m.cost.cacheWrite > 0);
+assert(cacheWriteModels.length > 0, "at least one model exposes cache-write pricing");
+for (const m of cacheWriteModels) {
+	assertEq(m.compat.cacheControlFormat, "anthropic", `model ${m.id}: cache-control format`);
+}
+assert(models.some((m) => (m.cost.tiers?.length ?? 0) > 0), "at least one model exposes long-context pricing tiers");
 
 const effortModels = models.filter((m) => m.reasoning && m.compat.supportsReasoningEffort);
 assert(effortModels.length > 0, "at least one effort-controlled reasoning model exists");
