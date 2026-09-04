@@ -333,6 +333,24 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 			veniceParameters.disable_thinking = true;
 		}
 
-		return { ...payload, venice_parameters: veniceParameters };
+		// pi adds Anthropic-style cache_control to the LAST tool definition when
+		// a model advertises cache pricing (cacheControlFormat: "anthropic").
+		// Venice's chat schema rejects cache_control on tools entirely
+		// (400: Extra inputs are not permitted, field: 'tools[N].cache_control')
+		// — seen with kimi-k3 — so strip it from every tool. Message-level
+		// cache_control is left intact; Venice documents support for it there.
+		const tools = payload.tools;
+		let strippedTools = tools;
+		if (Array.isArray(tools)) {
+			strippedTools = tools.map((tool: unknown) => {
+				if (tool && typeof tool === "object" && "cache_control" in tool) {
+					const { cache_control: _dropped, ...rest } = tool as Record<string, unknown>;
+					return rest;
+				}
+				return tool;
+			});
+		}
+
+		return { ...payload, tools: strippedTools, venice_parameters: veniceParameters };
 	}) as never);
 }
