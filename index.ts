@@ -27,7 +27,8 @@
  *   - Streamed `reasoning_content` / `reasoning_details` are handled by pi's
  *     built-in openai-completions API (no custom streaming needed)
  *   - Prompt-cache read/write rates and long-context pricing tiers are mapped
- *     from the live catalog
+ *     from the live catalog; cache-capable models declare supportsLongCacheRetention
+ *     so pi can request prompt_cache_retention: "24h" when configured
  *
  * Usage:
  *   /login venice        # enter your Venice API key (or export VENICE_API_KEY)
@@ -110,6 +111,15 @@ interface VeniceCapabilities {
 	supportsMultipleImages?: boolean;
 	supportsFunctionCalling?: boolean;
 	supportsE2EE?: boolean;
+	supportsWebSearch?: boolean;
+	supportsXSearch?: boolean;
+	supportsResponseSchema?: boolean;
+	supportsLogProbs?: boolean;
+	supportsAudioInput?: boolean;
+	supportsVideoInput?: boolean;
+	supportsTeeAttestation?: boolean;
+	optimizedForCode?: boolean;
+	quantization?: string;
 }
 
 interface VeniceModelSpec {
@@ -217,6 +227,7 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 							cacheWrite: extended.cache_write?.usd ?? baseCost.cacheWrite,
 						},
 					];
+		const hasCacheSupport = !!(pricing.cache_input || pricing.cache_write);
 		const input: ("text" | "image")[] = caps.supportsVision ? ["text", "image"] : ["text"];
 
 		const model = {
@@ -240,7 +251,9 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 				// Venice prefers max_completion_tokens over the deprecated max_tokens.
 				maxTokensField: "max_completion_tokens" as const,
 				// Venice accepts Anthropic-style cache_control markers on content parts.
-				...(pricing.cache_input || pricing.cache_write ? { cacheControlFormat: "anthropic" as const } : {}),
+				...(hasCacheSupport ? { cacheControlFormat: "anthropic" as const } : {}),
+				// Venice supports prompt_cache_retention: "24h" for cache-capable models.
+				...(hasCacheSupport ? { supportsLongCacheRetention: true } : {}),
 			},
 		} as unknown as Model<Api>;
 

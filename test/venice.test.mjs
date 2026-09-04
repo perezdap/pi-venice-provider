@@ -86,7 +86,7 @@ for (const m of models) {
 	}
 }
 
-const traitModels = models.filter((m) => ["default", "default_reasoning", "default_code", "default_vision", "function_calling_default", "most_intelligent", "most_uncensored"].includes(m.id));
+const traitModels = models.filter((m) => ["default", "default_reasoning", "default_code", "default_vision", "function_calling_default", "most_intelligent", "most_uncensored", "fastest"].includes(m.id));
 assert(traitModels.length > 0, "discovered stable trait aliases from /models/traits");
 for (const m of traitModels) {
 	assert(m.name.includes("trait →"), `trait ${m.id}: display name identifies resolved target`);
@@ -96,6 +96,7 @@ const cacheWriteModels = models.filter((m) => m.cost.cacheWrite > 0);
 assert(cacheWriteModels.length > 0, "at least one model exposes cache-write pricing");
 for (const m of cacheWriteModels) {
 	assertEq(m.compat.cacheControlFormat, "anthropic", `model ${m.id}: cache-control format`);
+	assertEq(m.compat.supportsLongCacheRetention, true, `model ${m.id}: supportsLongCacheRetention`);
 }
 assert(models.some((m) => (m.cost.tiers?.length ?? 0) > 0), "at least one model exposes long-context pricing tiers");
 
@@ -124,10 +125,11 @@ for (const m of models.filter((mm) => mm.input.includes("image"))) {
 }
 
 // Known-model sanity (if present in the live catalog).
+// Use range checks for specs that Venice may adjust server-side.
 const glm51 = models.find((m) => m.id === "zai-org-glm-5-1");
 if (glm51) {
-	assertEq(glm51.contextWindow, 200000, "glm-5-1 contextWindow = 200000");
-	assertEq(glm51.maxTokens, 80000, "glm-5-1 maxTokens = 80000");
+	assert(glm51.contextWindow >= 128000 && glm51.contextWindow <= 500000, `glm-5-1 contextWindow in [128k, 500k] (got ${glm51.contextWindow})`);
+	assert(glm51.maxTokens >= 8000 && glm51.maxTokens <= glm51.contextWindow, `glm-5-1 maxTokens in [8k, ctx] (got ${glm51.maxTokens})`);
 	assertEq(glm51.reasoning, true, "glm-5-1 reasoning = true");
 	assertEq(glm51.compat.supportsReasoningEffort, true, "glm-5-1 supportsReasoningEffort");
 	assertEq(glm51.thinkingLevelMap.off, "none", "glm-5-1 off -> none (Venice lists none)");
