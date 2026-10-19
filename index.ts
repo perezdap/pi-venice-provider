@@ -27,8 +27,11 @@
  *   - Streamed `reasoning_content` / `reasoning_details` are handled by pi's
  *     built-in openai-completions API (no custom streaming needed)
  *   - Prompt-cache read/write rates and long-context pricing tiers are mapped
- *     from the live catalog; cache-capable models declare supportsLongCacheRetention
- *     so pi can request prompt_cache_retention: "24h" when configured
+ *     from the live catalog for every model. Anthropic-style cache_control
+ *     markers and long cache retention are only declared for model families
+ *     whose Venice upstream accepts them (Claude). Cache pricing alone does
+ *     not prove marker support: DeepSeek prices cached input but its strict
+ *     endpoint rejects cache_control fields with HTTP 400.
  *
  * Usage:
  *   /login venice        # enter your Venice API key (or export VENICE_API_KEY)
@@ -54,6 +57,18 @@ const VENICE_MODEL_TRAITS_URL = "https://api.venice.ai/api/v1/models/traits?type
 
 // pi thinking levels in increasing order of effort. Venice's "none" is pi's "off".
 const PI_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * True when a Venice model's upstream accepts Anthropic-style cache_control
+ * markers. Only Claude models are verified to accept them through Venice's
+ * OpenAI-compatible endpoint. Other families may price cached input because
+ * they cache automatically, without accepting explicit markers. Defaulting
+ * unknown families to false is safe: the worst case is a missed caching
+ * optimization, not a rejected request.
+ */
+function acceptsAnthropicCacheControl(modelId: string): boolean {
+	return /(^|\/)claude-/.test(modelId);
+}
 const DEFAULT_CONTEXT_WINDOW = 128_000;
 const DEFAULT_MAX_TOKENS = 8_192;
 const DISCOVERY_TIMEOUT_MS = 15_000;
@@ -227,7 +242,7 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 							cacheWrite: extended.cache_write?.usd ?? baseCost.cacheWrite,
 						},
 					];
-		const hasCacheSupport = !!(pricing.cache_input || pricing.cache_write);
+		const acceptsCacheControl = acceptsAnthropicCacheControl(m.id);
 		const input: ("text" | "image")[] = caps.supportsVision ? ["text", "image"] : ["text"];
 
 		const model = {
@@ -250,10 +265,11 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 				supportsReasoningEffort: effort,
 				// Venice prefers max_completion_tokens over the deprecated max_tokens.
 				maxTokensField: "max_completion_tokens" as const,
-				// Venice accepts Anthropic-style cache_control markers on content parts.
-				...(hasCacheSupport ? { cacheControlFormat: "anthropic" as const } : {}),
-				// Venice supports prompt_cache_retention: "24h" for cache-capable models.
-				...(hasCacheSupport ? { supportsLongCacheRetention: true } : {}),
+				// Only verified families accept Anthropic-style cache_control markers.
+				// Cache pricing stays mapped in cost for every model regardless.
+				...(acceptsCacheControl ? { cacheControlFormat: "anthropic" as const } : {}),
+				// Long cache retention uses the same markers, so it shares the gate.
+				...(acceptsCacheControl ? { supportsLongCacheRetention: true } : {}),
 			},
 		} as unknown as Model<Api>;
 

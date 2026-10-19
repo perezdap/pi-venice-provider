@@ -94,9 +94,27 @@ for (const m of traitModels) {
 
 const cacheWriteModels = models.filter((m) => m.cost.cacheWrite > 0);
 assert(cacheWriteModels.length > 0, "at least one model exposes cache-write pricing");
-for (const m of cacheWriteModels) {
+
+// Anthropic cache_control markers are a per-family capability, not a pricing
+// signal. Only Claude models may declare them. Cache pricing must stay mapped
+// for every model, including families that cache automatically.
+const claudeModels = models.filter((m) => /(^|\/)claude-/.test(m.id));
+assert(claudeModels.length > 0, "at least one Claude model is discovered");
+for (const m of claudeModels) {
 	assertEq(m.compat.cacheControlFormat, "anthropic", `model ${m.id}: cache-control format`);
 	assertEq(m.compat.supportsLongCacheRetention, true, `model ${m.id}: supportsLongCacheRetention`);
+}
+for (const m of models.filter((mm) => liveById.has(mm.id) && !/(^|\/)claude-/.test(mm.id))) {
+	assertEq(m.compat.cacheControlFormat, undefined, `model ${m.id}: no cache-control format (not a verified family)`);
+	assertEq(m.compat.supportsLongCacheRetention, undefined, `model ${m.id}: no long cache retention (not a verified family)`);
+}
+// Regression: deepseek-v4-1-flash-1017 prices cached input, but its upstream
+// rejected tools[].cache_control with HTTP 400.
+const deepseek1017 = models.find((m) => m.id === "deepseek-v4-1-flash-1017");
+if (deepseek1017) {
+	assert(deepseek1017.cost.cacheRead > 0, "deepseek-v4-1-flash-1017: cache pricing still mapped");
+	assertEq(deepseek1017.compat.cacheControlFormat, undefined, "deepseek-v4-1-flash-1017: no cache-control format");
+	assertEq(deepseek1017.compat.supportsLongCacheRetention, undefined, "deepseek-v4-1-flash-1017: no long cache retention");
 }
 assert(models.some((m) => (m.cost.tiers?.length ?? 0) > 0), "at least one model exposes long-context pricing tiers");
 
