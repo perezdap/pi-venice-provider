@@ -293,31 +293,35 @@ globalThis.fetch = async (url) => ({
 	statusText: "OK",
 	json: async () => (String(url).includes("/models/traits") ? fixtureTraits : fixtureCatalog),
 });
+const fixtureRegistered = [];
+const fixturePi = {
+	registerProvider(provider) {
+		fixtureRegistered.push(provider);
+	},
+	on() {},
+};
 try {
-	const fixtureRegistered = [];
-	const fixturePi = {
-		registerProvider(provider) {
-			fixtureRegistered.push(provider);
-		},
-		on() {},
-	};
 	await factory(fixturePi);
-	const fixtureModels = fixtureRegistered[0].getModels();
-	const fixtureById = new Map(fixtureModels.map((m) => [m.id, m]));
-	assertEq(fixtureById.get("claude-fixture-1")?.compat.cacheControlFormat, "anthropic", "fixture claude: cache-control format");
-	assertEq(fixtureById.get("claude-fixture-1")?.compat.supportsLongCacheRetention, true, "fixture claude: supportsLongCacheRetention");
-	for (const id of ["deepseek-v4-1-flash-1017", "qwen-fixture-1"]) {
-		assertEq(fixtureById.get(id)?.compat.cacheControlFormat, undefined, `fixture ${id}: no cache-control format`);
-		assertEq(fixtureById.get(id)?.compat.supportsLongCacheRetention, undefined, `fixture ${id}: no long cache retention`);
-		assert(fixtureById.get(id)?.cost.cacheRead > 0, `fixture ${id}: cache pricing still mapped`);
-	}
-	// Trait aliases inherit the cache flags of their resolved target.
-	assertEq(fixtureById.get("fixture_claude_alias")?.compat.cacheControlFormat, "anthropic", "fixture trait -> claude: inherits cache-control format");
-	assertEq(fixtureById.get("fixture_claude_alias")?.compat.supportsLongCacheRetention, true, "fixture trait -> claude: inherits supportsLongCacheRetention");
-	assertEq(fixtureById.get("fixture_deepseek_alias")?.compat.cacheControlFormat, undefined, "fixture trait -> deepseek: inherits no cache-control format");
 } finally {
+	// Restore before any assertion runs, so the stub cannot leak into later
+	// tests in the same process even if an assertion or lookup fails.
 	globalThis.fetch = realFetch;
 }
+assertEq(globalThis.fetch, realFetch, "fixture: global fetch restored after factory");
+assertEq(fixtureRegistered.length, 1, "fixture: exactly one provider registered");
+const fixtureModels = fixtureRegistered[0]?.getModels() ?? [];
+const fixtureById = new Map(fixtureModels.map((m) => [m.id, m]));
+assertEq(fixtureById.get("claude-fixture-1")?.compat.cacheControlFormat, "anthropic", "fixture claude: cache-control format");
+assertEq(fixtureById.get("claude-fixture-1")?.compat.supportsLongCacheRetention, true, "fixture claude: supportsLongCacheRetention");
+for (const id of ["deepseek-v4-1-flash-1017", "qwen-fixture-1"]) {
+	assertEq(fixtureById.get(id)?.compat.cacheControlFormat, undefined, `fixture ${id}: no cache-control format`);
+	assertEq(fixtureById.get(id)?.compat.supportsLongCacheRetention, undefined, `fixture ${id}: no long cache retention`);
+	assert(fixtureById.get(id)?.cost.cacheRead > 0, `fixture ${id}: cache pricing still mapped`);
+}
+// Trait aliases inherit the cache flags of their resolved target.
+assertEq(fixtureById.get("fixture_claude_alias")?.compat.cacheControlFormat, "anthropic", "fixture trait -> claude: inherits cache-control format");
+assertEq(fixtureById.get("fixture_claude_alias")?.compat.supportsLongCacheRetention, true, "fixture trait -> claude: inherits supportsLongCacheRetention");
+assertEq(fixtureById.get("fixture_deepseek_alias")?.compat.cacheControlFormat, undefined, "fixture trait -> deepseek: inherits no cache-control format");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
