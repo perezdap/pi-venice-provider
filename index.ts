@@ -28,10 +28,12 @@
  *     built-in openai-completions API (no custom streaming needed)
  *   - Prompt-cache read/write rates and long-context pricing tiers are mapped
  *     from the live catalog for every model. Anthropic-style cache_control
- *     markers and long cache retention are only declared for model families
- *     whose Venice upstream accepts them (Claude). Cache pricing alone does
- *     not prove marker support: DeepSeek prices cached input but its strict
- *     endpoint rejects cache_control fields with HTTP 400.
+ *     markers are only declared for Claude models, the only family verified
+ *     to accept them through Venice. Other families are not sent markers
+ *     because an unverified marker can make a strict upstream reject the
+ *     request, as DeepSeek does with HTTP 400. Claude models also declare
+ *     long cache retention. A live Claude request through Venice accepted
+ *     cache_control.ttl: "1h" together with prompt_cache_retention: "24h".
  *
  * Usage:
  *   /login venice        # enter your Venice API key (or export VENICE_API_KEY)
@@ -59,12 +61,12 @@ const VENICE_MODEL_TRAITS_URL = "https://api.venice.ai/api/v1/models/traits?type
 const PI_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 /**
- * True when a Venice model's upstream accepts Anthropic-style cache_control
- * markers. Only Claude models are verified to accept them through Venice's
- * OpenAI-compatible endpoint. Other families may price cached input because
- * they cache automatically, without accepting explicit markers. Defaulting
- * unknown families to false is safe: the worst case is a missed caching
- * optimization, not a rejected request.
+ * True when a Venice model's upstream is verified to accept Anthropic-style
+ * cache_control markers. Only Claude models are verified through Venice's
+ * OpenAI-compatible endpoint. Other families are not sent markers because an
+ * unverified marker can make a strict upstream reject the request.
+ * Defaulting unknown families to false is safe: the worst case is a missed
+ * caching optimization, not a rejected request.
  */
 function acceptsAnthropicCacheControl(modelId: string): boolean {
 	return /(^|\/)claude-/.test(modelId);
@@ -265,10 +267,12 @@ async function discoverVeniceModels(signal?: AbortSignal): Promise<DiscoveredCat
 				supportsReasoningEffort: effort,
 				// Venice prefers max_completion_tokens over the deprecated max_tokens.
 				maxTokensField: "max_completion_tokens" as const,
-				// Only verified families accept Anthropic-style cache_control markers.
-				// Cache pricing stays mapped in cost for every model regardless.
+				// Only Claude models are verified to accept Anthropic-style
+				// cache_control markers. Cache pricing stays mapped in cost for
+				// every model regardless.
 				...(acceptsCacheControl ? { cacheControlFormat: "anthropic" as const } : {}),
-				// Long cache retention uses the same markers, so it shares the gate.
+				// Long cache retention uses the same markers, so it shares the
+				// gate. Verified for Claude through Venice with a live request.
 				...(acceptsCacheControl ? { supportsLongCacheRetention: true } : {}),
 			},
 		} as unknown as Model<Api>;

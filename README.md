@@ -35,10 +35,11 @@ Completions API (`https://api.venice.ai/api/v1`).
     by the built-in `openai-completions` API
   - Prompt-cache read/write rates and long-context pricing tiers are mapped
     from the catalog for every model. Only Claude models declare Anthropic
-    `cache_control` markers and `supportsLongCacheRetention`, because only
-    that family is verified to accept the markers through Venice. Other
-    families price cached input for automatic caching and reject explicit
-    `cache_control` fields.
+    `cache_control` markers, because only that family is verified to accept
+    them through Venice. Other families are not sent markers because an
+    unverified marker can make a strict upstream reject the request, as
+    DeepSeek does. Claude models also declare long cache retention, which
+    was verified with a live Claude request through Venice.
 
 ## Install
 
@@ -105,7 +106,7 @@ To pick up newly added Venice models, run `/reload` (the factory re-fetches
   with function calling that do not require Venice's E2EE transport handshake.
   Trait entries are aliases whose request model ID remains the trait, allowing
   Venice to resolve the current target. Claude models declare
-  `supportsLongCacheRetention: true` so pi can use long cache retention.
+  `cacheControlFormat: "anthropic"` and `supportsLongCacheRetention: true`.
   Trait aliases inherit the compat flags of their resolved target model.
 - **Venice parameters:** injected via a `before_provider_request` handler
   scoped to `provider === "venice"`.
