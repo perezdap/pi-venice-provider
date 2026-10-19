@@ -91,12 +91,45 @@ assert(traitModels.length > 0, "discovered stable trait aliases from /models/tra
 for (const m of traitModels) {
 	assert(m.name.includes("trait →"), `trait ${m.id}: display name identifies resolved target`);
 }
+// Trait aliases must inherit the cache compat flags of their resolved target.
+const liveTraits = await fetch("https://api.venice.ai/api/v1/models/traits?type=text").then((response) => response.json());
+let traitInheritanceChecked = 0;
+for (const m of traitModels) {
+	const target = models.find((mm) => mm.id === liveTraits.data?.[m.id]);
+	if (!target) continue;
+	traitInheritanceChecked++;
+	assertEq(m.compat.cacheControlFormat, target.compat.cacheControlFormat, `trait ${m.id}: inherits cacheControlFormat from ${target.id}`);
+	assertEq(m.compat.supportsLongCacheRetention, target.compat.supportsLongCacheRetention, `trait ${m.id}: inherits supportsLongCacheRetention from ${target.id}`);
+}
+assert(traitInheritanceChecked > 0, "at least one trait alias checked for cache flag inheritance");
 
 const cacheWriteModels = models.filter((m) => m.cost.cacheWrite > 0);
 assert(cacheWriteModels.length > 0, "at least one model exposes cache-write pricing");
-for (const m of cacheWriteModels) {
+
+// Anthropic cache_control markers are a per-family capability, not a pricing
+// signal. Only Claude models may declare them. Cache pricing must stay mapped
+// for every model, including families that cache automatically.
+const claudeModels = models.filter((m) => /(^|\/)claude-/.test(m.id));
+assert(claudeModels.length > 0, "at least one Claude model is discovered");
+for (const m of claudeModels) {
 	assertEq(m.compat.cacheControlFormat, "anthropic", `model ${m.id}: cache-control format`);
 	assertEq(m.compat.supportsLongCacheRetention, true, `model ${m.id}: supportsLongCacheRetention`);
+}
+for (const m of models.filter((mm) => liveById.has(mm.id) && !/(^|\/)claude-/.test(mm.id))) {
+	assertEq(m.compat.cacheControlFormat, undefined, `model ${m.id}: no cache-control format (not a verified family)`);
+	assertEq(m.compat.supportsLongCacheRetention, undefined, `model ${m.id}: no long cache retention (not a verified family)`);
+}
+// Regression: deepseek-v4-1-flash-1017 prices cached input, but its upstream
+// rejected tools[].cache_control with HTTP 400. If Venice still lists the ID,
+// the provider must map it. Absence from the live catalog is the only skip.
+if (liveById.has("deepseek-v4-1-flash-1017")) {
+	const deepseek1017 = models.find((m) => m.id === "deepseek-v4-1-flash-1017");
+	assert(!!deepseek1017, "deepseek-v4-1-flash-1017: in live catalog but missing from mapped models");
+	if (deepseek1017) {
+		assert(deepseek1017.cost.cacheRead > 0, "deepseek-v4-1-flash-1017: cache pricing still mapped");
+		assertEq(deepseek1017.compat.cacheControlFormat, undefined, "deepseek-v4-1-flash-1017: no cache-control format");
+		assertEq(deepseek1017.compat.supportsLongCacheRetention, undefined, "deepseek-v4-1-flash-1017: no long cache retention");
+	}
 }
 assert(models.some((m) => (m.cost.tiers?.length ?? 0) > 0), "at least one model exposes long-context pricing tiers");
 
@@ -230,6 +263,65 @@ if (process.env.VENICE_API_KEY) {
 const noneCtx = { env: async () => undefined };
 const none = await auth.resolve({ ctx: noneCtx, credential: undefined, signal: { throwIfAborted() {} } });
 assertEq(none, undefined, "resolve(): undefined when nothing configured");
+
+// ---- fixture catalog: cache gating without the live catalog ----
+// Pins the mapping for a fixed catalog, so a Venice catalog change (including
+// retiring deepseek-v4-1-flash-1017) cannot skip the regression case.
+const fixtureModel = (id, pricing) => ({
+	id,
+	type: "text",
+	object: "model",
+	model_spec: {
+		name: id,
+		pricing,
+		availableContextTokens: 128000,
+		maxCompletionTokens: 8192,
+		capabilities: { supportsFunctionCalling: true, supportsReasoning: false },
+	},
+});
+const fixtureCatalog = {
+	data: [
+		fixtureModel("claude-fixture-1", { input: { usd: 1 }, cache_input: { usd: 0.1 }, cache_write: { usd: 1.25 }, output: { usd: 5 } }),
+		fixtureModel("deepseek-v4-1-flash-1017", { input: { usd: 0.3 }, cache_input: { usd: 0.0075 }, output: { usd: 1.2 } }),
+		fixtureModel("qwen-fixture-1", { input: { usd: 1 }, cache_input: { usd: 0.1 }, cache_write: { usd: 2.5 }, output: { usd: 5 } }),
+	],
+};
+const fixtureTraits = { data: { fixture_claude_alias: "claude-fixture-1", fixture_deepseek_alias: "deepseek-v4-1-flash-1017" } };
+const realFetch = globalThis.fetch;
+globalThis.fetch = async (url) => ({
+	ok: true,
+	statusText: "OK",
+	json: async () => (String(url).includes("/models/traits") ? fixtureTraits : fixtureCatalog),
+});
+const fixtureRegistered = [];
+const fixturePi = {
+	registerProvider(provider) {
+		fixtureRegistered.push(provider);
+	},
+	on() {},
+};
+try {
+	await factory(fixturePi);
+} finally {
+	// Restore before any assertion runs, so the stub cannot leak into later
+	// tests in the same process even if an assertion or lookup fails.
+	globalThis.fetch = realFetch;
+}
+assertEq(globalThis.fetch, realFetch, "fixture: global fetch restored after factory");
+assertEq(fixtureRegistered.length, 1, "fixture: exactly one provider registered");
+const fixtureModels = fixtureRegistered[0]?.getModels() ?? [];
+const fixtureById = new Map(fixtureModels.map((m) => [m.id, m]));
+assertEq(fixtureById.get("claude-fixture-1")?.compat.cacheControlFormat, "anthropic", "fixture claude: cache-control format");
+assertEq(fixtureById.get("claude-fixture-1")?.compat.supportsLongCacheRetention, true, "fixture claude: supportsLongCacheRetention");
+for (const id of ["deepseek-v4-1-flash-1017", "qwen-fixture-1"]) {
+	assertEq(fixtureById.get(id)?.compat.cacheControlFormat, undefined, `fixture ${id}: no cache-control format`);
+	assertEq(fixtureById.get(id)?.compat.supportsLongCacheRetention, undefined, `fixture ${id}: no long cache retention`);
+	assert(fixtureById.get(id)?.cost.cacheRead > 0, `fixture ${id}: cache pricing still mapped`);
+}
+// Trait aliases inherit the cache flags of their resolved target.
+assertEq(fixtureById.get("fixture_claude_alias")?.compat.cacheControlFormat, "anthropic", "fixture trait -> claude: inherits cache-control format");
+assertEq(fixtureById.get("fixture_claude_alias")?.compat.supportsLongCacheRetention, true, "fixture trait -> claude: inherits supportsLongCacheRetention");
+assertEq(fixtureById.get("fixture_deepseek_alias")?.compat.cacheControlFormat, undefined, "fixture trait -> deepseek: inherits no cache-control format");
 
 console.log(`\n${pass} passed, ${fail} failed`);
 if (fail > 0) process.exit(1);
